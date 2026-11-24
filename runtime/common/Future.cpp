@@ -8,6 +8,7 @@
 
 #include "Future.h"
 #include "ObserveResult.h"
+#include "PollingPolicy.h"
 #include "RestClient.h"
 #include "ServerHelper.h"
 #include "nlohmann/json.hpp"
@@ -34,13 +35,16 @@ sample_result future::get() {
     CUDAQ_INFO("Future got job retrieval path as {}.", jobGetPath);
     auto resultResponse =
         client.get(jobGetPath, "", headers, false, serverHelper->getCookies());
-    while (!serverHelper->jobIsDone(resultResponse)) {
-      auto polling_interval =
-          serverHelper->nextResultPollingInterval(resultResponse);
-      std::this_thread::sleep_for(polling_interval);
-      resultResponse = client.get(jobGetPath, "", headers, false,
-                                  serverHelper->getCookies());
-    }
+    resultResponse = polling::pollUntilDone(
+        std::move(resultResponse),
+        [&](ServerMessage &r) { return serverHelper->jobIsDone(r); },
+        [&] {
+          return client.get(jobGetPath, "", headers, false,
+                            serverHelper->getCookies());
+        },
+        [&](ServerMessage &r) {
+          return serverHelper->nextResultPollingInterval(r);
+        });
 
     if (resultType == ExecutionContextType::run) {
       QirServerHelper *qirServerHelper =
