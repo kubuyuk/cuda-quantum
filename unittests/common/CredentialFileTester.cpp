@@ -67,8 +67,8 @@ protected:
 TEST_F(CredentialFileTester, parsesNormalFile) {
   auto entries =
       parse(write("key:abc\nrefresh:def\ntime:123\n"), simpleFormat());
-  EXPECT_EQ(entries, (Entries{{"key", "abc"}, {"refresh", "def"},
-                              {"time", "123"}}));
+  EXPECT_EQ(entries,
+            (Entries{{"key", "abc"}, {"refresh", "def"}, {"time", "123"}}));
 }
 
 TEST_F(CredentialFileTester, lastLineNeedsNoNewline) {
@@ -80,8 +80,8 @@ TEST_F(CredentialFileTester, trimsWhitespaceAroundKeyAndValue) {
   auto entries =
       parse(write("  key  :  abc  \n\trefresh :\tdef\t\r\n time : 99 \n"),
             simpleFormat());
-  EXPECT_EQ(entries, (Entries{{"key", "abc"}, {"refresh", "def"},
-                              {"time", "99"}}));
+  EXPECT_EQ(entries,
+            (Entries{{"key", "abc"}, {"refresh", "def"}, {"time", "99"}}));
 }
 
 TEST_F(CredentialFileTester, emptyFileHasNoEntries) {
@@ -144,8 +144,8 @@ TEST_F(CredentialFileTester, blankAndCommentLinesAreIllFormed) {
 
 TEST_F(CredentialFileTester, duplicateKeysAreReportedInFileOrder) {
   auto entries = parse(write("key:one\nrefresh:r\nkey:two\n"), simpleFormat());
-  EXPECT_EQ(entries, (Entries{{"key", "one"}, {"refresh", "r"},
-                              {"key", "two"}}));
+  EXPECT_EQ(entries,
+            (Entries{{"key", "one"}, {"refresh", "r"}, {"key", "two"}}));
   std::map<std::string, std::string> last;
   for (auto &[k, v] : entries)
     last[k] = v;
@@ -165,17 +165,16 @@ TEST_F(CredentialFileTester, errorsAreRaisedInFileOrder) {
 }
 
 TEST_F(CredentialFileTester, callbackExceptionsPropagate) {
-  EXPECT_THROW(cudaq::parseCredentialFile(
-                   write("key:abc\n"), simpleFormat(),
-                   [](const std::string &, const std::string &) {
-                     throw std::logic_error("from callback");
-                   }),
-               std::logic_error);
+  EXPECT_THROW(
+      cudaq::parseCredentialFile(write("key:abc\n"), simpleFormat(),
+                                 [](const std::string &, const std::string &) {
+                                   throw std::logic_error("from callback");
+                                 }),
+      std::logic_error);
 }
 
 TEST_F(CredentialFileTester, missingFileBehavesLikeEmptyFile) {
-  EXPECT_TRUE(
-      parse((dir / "does-not-exist").string(), simpleFormat()).empty());
+  EXPECT_TRUE(parse((dir / "does-not-exist").string(), simpleFormat()).empty());
 }
 
 TEST_F(CredentialFileTester, unreadableFileBehavesLikeEmptyFile) {
@@ -198,7 +197,8 @@ TEST_F(CredentialFileTester, multiColonKeyKeepsItsColons) {
                               {"refresh", "r"}}));
 }
 
-TEST_F(CredentialFileTester, multiColonKeyMustBeWrittenWithoutSpaceBeforeColon) {
+TEST_F(CredentialFileTester,
+       multiColonKeyMustBeWrittenWithoutSpaceBeforeColon) {
   auto f = simpleFormat();
   f.allowedKeys.push_back("credentials");
   f.multiColonKey = "credentials";
@@ -213,6 +213,31 @@ TEST_F(CredentialFileTester, multiColonKeyNeedsItsFourPieces) {
   EXPECT_THROW(parse(write("credentials:x\n"), f), std::runtime_error);
   EXPECT_THROW(parse(write("credentials:a:b\n"), f), std::runtime_error);
   EXPECT_THROW(parse(write("credentials:a:b:c:d\n"), f), std::runtime_error);
+}
+
+// The Anyon helper's format. Before the parser was shared, a blank line or a
+// line like `credentials:x` read past the end of a vector (undefined
+// behaviour); both are now reported as an ill-formed file.
+TEST_F(CredentialFileTester, anyonFormatReportsFormerlyUndefinedLines) {
+  cudaq::CredentialFileFormat f;
+  f.allowedKeys = {"key", "refresh", "time", "credentials"};
+  f.formatHint = "`<key> : <value>` or `<key> : {username:<username>, "
+                 "password:<password>}` format. (One per line)";
+  f.multiColonKey = "credentials";
+  for (const char *contents : {"key:abc\n\nrefresh:def\n", "\n",
+                               "credentials:x\n", "credentials: x\n"}) {
+    auto path = write(contents);
+    try {
+      parse(path, f);
+      FAIL() << "expected an exception";
+    } catch (const std::runtime_error &e) {
+      EXPECT_EQ(std::string(e.what()),
+                "Ill-formed configuration file (" + path +
+                    "). Key-value pairs must be in `<key> : <value>` or "
+                    "`<key> : {username:<username>, password:<password>}` "
+                    "format. (One per line)");
+    }
+  }
 }
 
 TEST_F(CredentialFileTester, otherKeysCannotUseMultiColonForm) {
