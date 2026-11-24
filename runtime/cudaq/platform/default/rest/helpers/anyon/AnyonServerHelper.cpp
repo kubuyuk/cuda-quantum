@@ -6,6 +6,7 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 #include "AnyonHelper.h"
+#include "common/CredentialFile.h"
 #include "common/RestClient.h"
 #include "common/ServerHelper.h"
 #include "nlohmann/json.hpp"
@@ -370,50 +371,32 @@ void AnyonServerHelper::refreshTokens(bool force_refresh) {
 void findApiKeyInFile(std::string &apiKey, const std::string &path,
                       std::string &refreshKey, std::string &timeStr,
                       std::string &credentials) {
-  std::ifstream stream(path);
-  std::string contents((std::istreambuf_iterator<char>(stream)),
-                       std::istreambuf_iterator<char>());
-
-  std::vector<std::string> lines;
-  lines = cudaq::split(contents, '\n');
-  nlohmann::json jsoncreds;
-  for (const std::string &l : lines) {
-    std::vector<std::string> keyAndValue = cudaq::split(l, ':');
-    if ((keyAndValue.size() != 2) &&
-        ((keyAndValue[0] != "credentials") || (keyAndValue.size() != 4)))
-      throw std::runtime_error("Ill-formed configuration file (" + path +
-                               "). Key-value pairs must be in `<key> : "
-                               "<value>` or `<key> : {username:<username>, "
-                               "password:<password>}` format. (One per line)");
-    cudaq::trim(keyAndValue[0]);
-    cudaq::trim(keyAndValue[1]);
-    if (keyAndValue[0] == "key")
-      apiKey = keyAndValue[1];
-    else if (keyAndValue[0] == "refresh")
-      refreshKey = keyAndValue[1];
-    else if (keyAndValue[0] == "time")
-      timeStr = keyAndValue[1];
-    else if (keyAndValue[0] ==
-             "credentials") { // If the config file doesn't contain key and
-                              // refresh token, we will add the username
-                              // password to apikey for BasicHttpAuthentication
-                              // and generation of tokens
-      std::string linecontent =
-          keyAndValue[1] + ":" + keyAndValue[2] + ":" + keyAndValue[3];
-      // printf("The credentials read from the .config file is: %s",
-      // linecontent.c_str());
-      jsoncreds = json::parse(linecontent);
-      std::string delim(":");
-      std::string username = jsoncreds.at("username");
-      std::string passwd = jsoncreds.at("password");
-      std::string authInfo = username + delim + passwd;
-      // authInfo = base64::to_base64(authInfo);
-      authInfo = llvm::encodeBase64(authInfo);
-      credentials = "Basic " + authInfo;
-    } else
-      throw std::runtime_error(
-          "Unknown key in configuration file: " + keyAndValue[0] + ".");
-  }
+  cudaq::CredentialFileFormat format;
+  format.allowedKeys = {"key", "refresh", "time", "credentials"};
+  format.formatHint = "`<key> : <value>` or `<key> : {username:<username>, "
+                      "password:<password>}` format. (One per line)";
+  format.multiColonKey = "credentials";
+  cudaq::parseCredentialFile(
+      path, format, [&](const std::string &key, const std::string &value) {
+        if (key == "key")
+          apiKey = value;
+        else if (key == "refresh")
+          refreshKey = value;
+        else if (key == "time")
+          timeStr = value;
+        else if (key == "credentials") {
+          // If the config file doesn't contain key and refresh token, we will
+          // add the username password to apikey for BasicHttpAuthentication
+          // and generation of tokens
+          nlohmann::json jsoncreds = json::parse(value);
+          std::string delim(":");
+          std::string username = jsoncreds.at("username");
+          std::string passwd = jsoncreds.at("password");
+          std::string authInfo = username + delim + passwd;
+          authInfo = llvm::encodeBase64(authInfo);
+          credentials = "Basic " + authInfo;
+        }
+      });
 
   if (credentials.empty() && refreshKey.empty())
     throw std::runtime_error("Empty credentials in configuration file (" +
