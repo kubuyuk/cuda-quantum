@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "QuantinuumHelper.h"
+#include "common/CredentialFile.h"
 #include "common/ExtraPayloadProvider.h"
 #include "common/FmtCore.h"
 #include "common/RestClient.h"
@@ -202,30 +203,18 @@ public:
 // Load the API key and refresh token from the config file
 static void findApiKeyInFile(std::string &apiKey, const std::string &path,
                              std::string &refreshKey, std::string &timeStr) {
-  std::ifstream stream(path);
-  std::string contents((std::istreambuf_iterator<char>(stream)),
-                       std::istreambuf_iterator<char>());
-
-  std::vector<std::string> lines;
-  lines = cudaq::split(contents, '\n');
-  for (const std::string &l : lines) {
-    std::vector<std::string> keyAndValue = cudaq::split(l, ':');
-    if (keyAndValue.size() != 2)
-      throw std::runtime_error("Ill-formed configuration file (" + path +
-                               "). Key-value pairs must be in `<key> : "
-                               "<value>` format. (One per line)");
-    cudaq::trim(keyAndValue[0]);
-    cudaq::trim(keyAndValue[1]);
-    if (keyAndValue[0] == "key")
-      apiKey = keyAndValue[1];
-    else if (keyAndValue[0] == "refresh")
-      refreshKey = keyAndValue[1];
-    else if (keyAndValue[0] == "time")
-      timeStr = keyAndValue[1];
-    else
-      throw std::runtime_error(
-          "Unknown key in configuration file: " + keyAndValue[0] + ".");
-  }
+  cudaq::CredentialFileFormat format;
+  format.allowedKeys = {"key", "refresh", "time"};
+  format.formatHint = "`<key> : <value>` format. (One per line)";
+  cudaq::parseCredentialFile(
+      path, format, [&](const std::string &key, const std::string &value) {
+        if (key == "key")
+          apiKey = value;
+        else if (key == "refresh")
+          refreshKey = value;
+        else if (key == "time")
+          timeStr = value;
+      });
   if (apiKey.empty())
     throw std::runtime_error("Empty API key in configuration file (" + path +
                              ").");
