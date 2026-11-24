@@ -109,6 +109,13 @@ repos:
         language: system
         files: '^cudaq/include/cudaq/Optimizer/(CodeGen|Transforms)/Passes\.td$'
 
+      - id: shared-helpers
+        name: Check shared helpers are reused (see CodeReuseGuidelines.md)
+        entry: bash scripts/pre-commit/check_shared_helpers.sh
+        language: system
+        files: '^runtime/.*\.(cpp|h)$'
+        stages: [pre-commit, pre-push]
+
       # Spell checking (runs on push)
       - id: spellcheck
         name: Spell check (pyspelling)

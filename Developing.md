@@ -74,6 +74,11 @@ for Python. The CUDA-Q internals on the other hand follow the [MLIR/LLVM style
 guide][llvm_style]. Please ensure that your code includes comprehensive doc
 comments as well as a comment at the top of the file to indicating its purpose.
 
+Before adding a helper function or a loop to the remote-QPU layer, check
+[CodeReuseGuidelines.md](./CodeReuseGuidelines.md): it lists the shared helpers
+that already exist (environment variables, credential files, polling, argument
+parsing) and the checks that flag new copies.
+
 [python_style]: https://google.github.io/styleguide/pyguide.html
 [cpp_style]: https://www.gnu.org/prep/standards/standards.html
 [llvm_style]: https://llvm.org/docs/CodingStandards.html
@@ -174,6 +179,8 @@ git commit --no-verify  # Skip pre-commit hooks
 - Markdown linting
 - Trailing whitespace, end-of-file fixes
 - Large files, merge conflicts
+- Reuse of shared helpers in the `runtime/` remote-QPU layer
+  ([CodeReuseGuidelines.md](./CodeReuseGuidelines.md))
 
 **All checks (run on push):**
 
