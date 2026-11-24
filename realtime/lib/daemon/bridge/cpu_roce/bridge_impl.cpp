@@ -78,6 +78,7 @@
 ///   destroy     free the transceiver
 
 #include "cudaq/realtime/cpu_transport/roce_wrapper.h"
+#include "cudaq/realtime/daemon/bridge/bridge_args.h"
 #include "cudaq/realtime/daemon/bridge/bridge_interface.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -124,10 +125,8 @@ struct CpuRoceBridgeContext {
   bool connected = false;
 };
 
-bool starts_with(const std::string &s, const char *prefix) {
-  const size_t n = std::strlen(prefix);
-  return s.size() >= n && std::memcmp(s.data(), prefix, n) == 0;
-}
+using cudaq::realtime::bridge_args::starts_with;
+using cudaq::realtime::bridge_args::to_unsigned;
 
 bool write_all(int fd, const void *buf, size_t len) {
   const auto *p = static_cast<const std::uint8_t *>(buf);
@@ -326,42 +325,38 @@ cpu_roce_bridge_create(cudaq_realtime_bridge_handle_t *handle, int argc,
     return CUDAQ_ERR_INVALID_ARG;
 
   auto *ctx = new CpuRoceBridgeContext();
-  for (int i = 0; i < argc; ++i) {
-    const std::string a = argv[i] ? argv[i] : "";
-    try {
-      if (starts_with(a, "--device="))
-        ctx->device = a.substr(9);
-      else if (starts_with(a, "--local-ip="))
-        ctx->local_ip = a.substr(11);
-      else if (starts_with(a, "--port="))
-        ctx->tcp_port = static_cast<std::uint16_t>(std::stoul(a.substr(7)));
-      else if (starts_with(a, "--num-slots="))
-        ctx->num_slots = static_cast<std::uint32_t>(std::stoul(a.substr(12)));
-      else if (starts_with(a, "--slot-size="))
-        ctx->slot_size = static_cast<std::uint32_t>(std::stoul(a.substr(12)));
-      else if (starts_with(a, "--qp_config="))
-        ctx->qp_config = a.substr(12);
-      else if (starts_with(a, "--peer-ip="))
-        ctx->peer_ip = a.substr(10);
-      else if (starts_with(a, "--remote-qp="))
-        // base 0: accepts both decimal and 0x-prefixed hex (QP numbers are
-        // conventionally printed in hex, e.g. the FPGA's fixed 0x2).
-        ctx->remote_qp =
-            static_cast<std::uint32_t>(std::stoul(a.substr(12), nullptr, 0));
-      else if (starts_with(a, "--frame-size="))
-        ctx->frame_size = std::stoull(a.substr(13));
-      else if (a == "--unified")
-        ctx->unified = true;
-      else if (a == "--forward")
-        ctx->forward = true;
-      // Unrecognized arguments are ignored (callers forward their full
-      // transport argument list).
-    } catch (const std::exception &) {
-      std::cerr << "ERROR: cpu_roce bridge: bad numeric value in '" << a << "'"
-                << std::endl;
-      delete ctx;
-      return CUDAQ_ERR_INVALID_ARG;
-    }
+  const bool args_ok = cudaq::realtime::bridge_args::for_each_arg(
+      argc, argv, "cpu_roce", [&](const std::string &a) {
+        if (starts_with(a, "--device="))
+          ctx->device = a.substr(9);
+        else if (starts_with(a, "--local-ip="))
+          ctx->local_ip = a.substr(11);
+        else if (starts_with(a, "--port="))
+          ctx->tcp_port = to_unsigned<std::uint16_t>(a.substr(7));
+        else if (starts_with(a, "--num-slots="))
+          ctx->num_slots = to_unsigned<std::uint32_t>(a.substr(12));
+        else if (starts_with(a, "--slot-size="))
+          ctx->slot_size = to_unsigned<std::uint32_t>(a.substr(12));
+        else if (starts_with(a, "--qp_config="))
+          ctx->qp_config = a.substr(12);
+        else if (starts_with(a, "--peer-ip="))
+          ctx->peer_ip = a.substr(10);
+        else if (starts_with(a, "--remote-qp="))
+          // base 0: accepts both decimal and 0x-prefixed hex (QP numbers are
+          // conventionally printed in hex, e.g. the FPGA's fixed 0x2).
+          ctx->remote_qp = to_unsigned<std::uint32_t>(a.substr(12), 0);
+        else if (starts_with(a, "--frame-size="))
+          ctx->frame_size = std::stoull(a.substr(13));
+        else if (a == "--unified")
+          ctx->unified = true;
+        else if (a == "--forward")
+          ctx->forward = true;
+        // Unrecognized arguments are ignored (callers forward their full
+        // transport argument list).
+      });
+  if (!args_ok) {
+    delete ctx;
+    return CUDAQ_ERR_INVALID_ARG;
   }
 
   if (ctx->forward && ctx->unified) {

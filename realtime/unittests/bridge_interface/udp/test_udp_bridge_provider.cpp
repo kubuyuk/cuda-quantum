@@ -119,6 +119,44 @@ TEST(UdpBridgeProvider, LoadsAndCreatesPlainBridgeWithoutCudaRuntime) {
             CUDAQ_ERR_INVALID_ARG);
 }
 
+// Argument handling in create(): a malformed number is refused with
+// CUDAQ_ERR_INVALID_ARG; unrecognised and null arguments are skipped.  These
+// pin the behaviour shared with the other bridge providers' argument parsing.
+TEST(UdpBridgeProvider, RejectsBadNumericArguments) {
+  for (const char *bad : {"--port=abc", "--num-slots=", "--slot-size=x1"}) {
+    std::string arg = bad;
+    std::vector<char *> argv = {arg.data()};
+    cudaq_realtime_bridge_handle_t bridge = nullptr;
+    EXPECT_EQ(cudaq_bridge_create_from_library(
+                  &bridge, UDP_BRIDGE_PROVIDER_PATH,
+                  static_cast<int>(argv.size()), argv.data()),
+              CUDAQ_ERR_INVALID_ARG)
+        << bad;
+  }
+}
+
+TEST(UdpBridgeProvider, IgnoresUnrecognisedAndNullArguments) {
+  std::string unknown = "--not-a-udp-option=1";
+  std::string port = "--port=0";
+  std::string slots = "--num-slots=8";
+  std::string size = "--slot-size=256";
+  std::vector<char *> argv = {unknown.data(), nullptr, port.data(),
+                              slots.data(), size.data()};
+  cudaq_realtime_bridge_handle_t bridge = nullptr;
+  ASSERT_EQ(cudaq_bridge_create_from_library(&bridge, UDP_BRIDGE_PROVIDER_PATH,
+                                             static_cast<int>(argv.size()),
+                                             argv.data()),
+            CUDAQ_OK);
+  ASSERT_NE(bridge, nullptr);
+  std::uint32_t num_slots = 0;
+  std::uint32_t slot_size = 0;
+  EXPECT_EQ(cudaq_bridge_get_ring_geometry(bridge, &num_slots, &slot_size),
+            CUDAQ_OK);
+  EXPECT_EQ(num_slots, 8u);
+  EXPECT_EQ(slot_size, 256u);
+  EXPECT_EQ(cudaq_bridge_destroy(bridge), CUDAQ_OK);
+}
+
 // The 3-thread ring shape and the single-thread unified shape are mutually
 // exclusive, and each is refused in the other's mode.  Refusing is the point:
 // silently serving the wrong one produces a transport that appears to drop

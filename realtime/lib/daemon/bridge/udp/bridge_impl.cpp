@@ -58,6 +58,7 @@
 ///   destroy     free the transceiver
 
 #include "cudaq/realtime/cpu_transport/udp_wrapper.h"
+#include "cudaq/realtime/daemon/bridge/bridge_args.h"
 #include "cudaq/realtime/daemon/bridge/bridge_interface.h"
 #include <cuda_runtime_api.h>
 
@@ -89,10 +90,8 @@ void free_pinned(UdpBridgeContext *ctx) {
   }
 }
 
-bool starts_with(const std::string &s, const char *prefix) {
-  const size_t n = std::strlen(prefix);
-  return s.size() >= n && std::memcmp(s.data(), prefix, n) == 0;
-}
+using cudaq::realtime::bridge_args::starts_with;
+using cudaq::realtime::bridge_args::to_unsigned;
 
 // Describe the transceiver's four rings.  Shared by both shapes: the ring
 // shape hands this out as the transport context, the unified shape embeds it
@@ -135,28 +134,24 @@ static cudaq_status_t udp_bridge_create(cudaq_realtime_bridge_handle_t *handle,
     return CUDAQ_ERR_INVALID_ARG;
 
   auto *ctx = new UdpBridgeContext();
-  for (int i = 0; i < argc; ++i) {
-    const std::string a = argv[i] ? argv[i] : "";
-    try {
-      if (starts_with(a, "--port="))
-        ctx->requested_port =
-            static_cast<std::uint16_t>(std::stoul(a.substr(7)));
-      else if (starts_with(a, "--num-slots="))
-        ctx->num_slots = static_cast<std::uint32_t>(std::stoul(a.substr(12)));
-      else if (starts_with(a, "--slot-size="))
-        ctx->slot_size = static_cast<std::uint32_t>(std::stoul(a.substr(12)));
-      else if (a == "--pinned-rings")
-        ctx->pinned_rings = true;
-      else if (a == "--unified")
-        ctx->unified = true;
-      // Unrecognized arguments are ignored (callers forward their full
-      // transport argument list).
-    } catch (const std::exception &) {
-      std::cerr << "ERROR: udp bridge: bad numeric value in '" << a << "'"
-                << std::endl;
-      delete ctx;
-      return CUDAQ_ERR_INVALID_ARG;
-    }
+  const bool args_ok = cudaq::realtime::bridge_args::for_each_arg(
+      argc, argv, "udp", [&](const std::string &a) {
+        if (starts_with(a, "--port="))
+          ctx->requested_port = to_unsigned<std::uint16_t>(a.substr(7));
+        else if (starts_with(a, "--num-slots="))
+          ctx->num_slots = to_unsigned<std::uint32_t>(a.substr(12));
+        else if (starts_with(a, "--slot-size="))
+          ctx->slot_size = to_unsigned<std::uint32_t>(a.substr(12));
+        else if (a == "--pinned-rings")
+          ctx->pinned_rings = true;
+        else if (a == "--unified")
+          ctx->unified = true;
+        // Unrecognized arguments are ignored (callers forward their full
+        // transport argument list).
+      });
+  if (!args_ok) {
+    delete ctx;
+    return CUDAQ_ERR_INVALID_ARG;
   }
 
   if (ctx->pinned_rings) {

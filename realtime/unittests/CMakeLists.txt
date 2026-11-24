@@ -56,6 +56,16 @@ cudaq_gtest_discover_tests(test_hsb_emulator_timing
 )
 message(STATUS "  - test_hsb_emulator_timing (host timestamp and ILA layout)")
 
+# Host-only tests for the shared bridge `--key=value` argument helpers.
+add_executable(test_bridge_args test_bridge_args.cpp)
+target_include_directories(test_bridge_args PRIVATE
+  ${CUDAQ_REALTIME_INCLUDE_DIR})
+target_link_libraries(test_bridge_args PRIVATE GTest::gtest_main)
+cudaq_gtest_discover_tests(test_bridge_args
+  TEST_PREFIX "test_bridge_args."
+)
+message(STATUS "  - test_bridge_args (shared bridge argument helpers)")
+
 # ==============================================================================
 # GPU Dispatch Kernel Tests
 # ==============================================================================
