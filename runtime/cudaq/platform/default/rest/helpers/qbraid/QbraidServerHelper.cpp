@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "common/ConfigUtils.h"
+#include "common/PollingPolicy.h"
 #include "common/RestClient.h"
 #include "common/ServerHelper.h"
 #include "cudaq/Support/Version.h"
@@ -14,6 +15,7 @@
 #include "cudaq/utils/cudaq_utils.h"
 #include <algorithm>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <regex>
 #include <thread>
 
@@ -202,156 +204,158 @@ public:
     const int waitTime = 2;
     const float backoffFactor = 2.0;
 
-    for (int attempt = 0; attempt < maxRetries; ++attempt) {
-      try {
-        auto resultsPath = constructGetResultsPath(jobId);
-        auto headers = getHeaders();
+    // Attempt `attempt`: returns the results, `nullopt` when there is no valid
+    // data yet, or throws. Shared retry/sleep sequencing: cudaq::polling.
+    auto fetchResults =
+        [&](int attempt) -> std::optional<cudaq::sample_result> {
+      auto resultsPath = constructGetResultsPath(jobId);
+      auto headers = getHeaders();
 
-        cudaq::info("Fetching results from v2 endpoint (attempt {}/{}): {}",
-                    attempt + 1, maxRetries, resultsPath);
-        RestClient client;
-        auto resultJson = client.get("", resultsPath, headers, true);
+      cudaq::info("Fetching results from v2 endpoint (attempt {}/{}): {}",
+                  attempt + 1, maxRetries, resultsPath);
+      RestClient client;
+      auto resultJson = client.get("", resultsPath, headers, true);
 
-        // v2 API: error indicated by success=false
-        if (resultJson.contains("success") &&
-            resultJson["success"].is_boolean() &&
-            !resultJson["success"].get<bool>()) {
-          std::string errorMsg = "Results not yet available";
-          if (resultJson.contains("data") &&
-              resultJson["data"].contains("message")) {
-            errorMsg = resultJson["data"]["message"].get<std::string>();
-          }
-          cudaq::info("Results endpoint returned success=false: {}", errorMsg);
-
-          if (attempt == maxRetries - 1) {
-            throw std::runtime_error("Error retrieving results: " + errorMsg);
-          }
+      // v2 API: error indicated by success=false
+      if (resultJson.contains("success") &&
+          resultJson["success"].is_boolean() &&
+          !resultJson["success"].get<bool>()) {
+        std::string errorMsg = "Results not yet available";
+        if (resultJson.contains("data") &&
+            resultJson["data"].contains("message")) {
+          errorMsg = resultJson["data"]["message"].get<std::string>();
         }
-        // v2 API: measurementCounts nested under data.resultData
-        else if (resultJson.contains("data") &&
-                 resultJson["data"].contains("resultData") &&
-                 resultJson["data"]["resultData"].contains(
-                     "measurementCounts")) {
-          cudaq::info("Processing results from v2 endpoint");
-          CountsDictionary counts;
-          auto &measurements =
-              resultJson["data"]["resultData"]["measurementCounts"];
+        cudaq::info("Results endpoint returned success=false: {}", errorMsg);
 
-          // qBraid reports each bitstring with classical bit 0 as the
-          // rightmost character (little-endian, as Qiskit does), while
-          // CUDA-Q indexes bitstrings with qubit 0 leftmost. The circuit
-          // measures the whole register in order (`measure q -> c`, see
-          // `combine-measurements` in qbraid.yml), so bit i is qubit i and
-          // reversing the key is the complete conversion. Mirrors the
-          // endian swap in the IonQ helper.
-          for (const auto &[bitstring, count] : measurements.items()) {
-            std::string key = bitstring;
-            std::reverse(key.begin(), key.end());
-            counts[key] = count.is_number()
-                              ? static_cast<std::size_t>(count.get<double>())
-                              : static_cast<std::size_t>(count);
-          }
-
-          // The returned bitstring spans every measured qubit, including
-          // compiler-generated ancillae that the user never declared. Reduce
-          // it down to the user-visible qubits using the output_names entry
-          // populated by the framework (Executor.cpp writes one per submitted
-          // circuit; Future.cpp re-initializes the helper with that config
-          // before processResults runs). Mirrors the IonQ / Braket helpers.
-          cudaq::ExecutionResult fullExecResults{counts};
-          auto fullSampleResults = cudaq::sample_result{fullExecResults};
-
-          std::vector<ExecutionResult> execResults;
-
-          auto outputNamesIt = outputNames.find(jobId);
-          if (outputNamesIt != outputNames.end() &&
-              !outputNamesIt->second.empty()) {
-            auto &job_output_names = outputNamesIt->second;
-
-            std::vector<std::size_t> qubitNumbers;
-            qubitNumbers.reserve(job_output_names.size());
-            for (auto &[result, info] : job_output_names)
-              qubitNumbers.push_back(info.qubitNum);
-
-            auto subset = fullSampleResults.get_marginal(qubitNumbers);
-            execResults.emplace_back(ExecutionResult{subset.to_map()});
-
-            // Emit one single-bit register per named result so that
-            // `sample_result::to_map(registerName)` still works.
-            for (const auto &[result, info] : job_output_names) {
-              CountsDictionary regCounts;
-              for (const auto &[bits, count] : fullSampleResults)
-                regCounts[std::string{bits[info.qubitNum]}] += count;
-              execResults.emplace_back(regCounts, info.registerName);
-            }
-          } else {
-            // No output_names available: fall back to the full flat counts.
-            execResults.emplace_back(ExecutionResult{counts});
-          }
-
-          return cudaq::sample_result(execResults);
-        }
-
-        // No valid data yet and no explicit error - retry
-        if (attempt < maxRetries - 1) {
-          int sleepTime = (attempt == 0)
-                              ? waitTime
-                              : waitTime * std::pow(backoffFactor, attempt);
-          cudaq::info("No valid results yet, retrying in {} seconds",
-                      sleepTime);
-          std::this_thread::sleep_for(std::chrono::seconds(sleepTime));
-        }
-
-      } catch (const std::exception &e) {
-        // RestClient throws std::runtime_error on any non-success HTTP status
-        // (see runtime/common/RestClient.cpp) with a fixed message format:
-        //   "HTTP <VERB> Error - status code <code>: <curl_err>: <body>"
-        // The code isn't exposed as a structured attribute, so we parse it
-        // out to distinguish terminal client errors (401/403/404/409) from
-        // transient server/network errors (5xx, parse errors) that retry.
-        static const std::regex statusRx(R"(status code (\d+))");
-        const std::string what = e.what();
-        std::smatch match;
-        int statusCode = 0;
-        if (std::regex_search(what, match, statusRx))
-          statusCode = std::stoi(match[1]);
-
-        // Terminal: auth failures - retrying will not recover.
-        if (statusCode == 401 || statusCode == 403)
-          throw std::runtime_error(
-              "qBraid authentication failed (HTTP " +
-              std::to_string(statusCode) +
-              "). Verify QBRAID_API_KEY or api_key target argument.");
-
-        // Terminal: result resource genuinely does not exist. This is
-        // distinct from the "not yet available" race which returns
-        // 200 + success=false (handled above).
-        if (statusCode == 404)
-          throw std::runtime_error(
-              "qBraid result not found (HTTP 404) for job " + jobId +
-              ". The job may have been deleted or never produced results.");
-
-        // Terminal: job reached a non-success terminal state (FAILED or
-        // CANCELLED). qBraid v2 returns 409 Conflict on /result in that case
-        // because no measurement data will ever be produced.
-        if (statusCode == 409)
-          throw std::runtime_error(
-              "qBraid job " + jobId +
-              " did not produce results (HTTP 409). The job likely FAILED "
-              "or was CANCELLED.");
-
-        // Retryable: 5xx, network errors, JSON parse failures, etc.
-        cudaq::info("Exception when fetching results (attempt {}/{}): {}",
-                    attempt + 1, maxRetries, what);
-        if (attempt < maxRetries - 1) {
-          int sleepTime = (attempt == 0)
-                              ? waitTime
-                              : waitTime * std::pow(backoffFactor, attempt);
-          cudaq::info("Retrying in {} seconds", sleepTime);
-          std::this_thread::sleep_for(std::chrono::seconds(sleepTime));
+        if (attempt == maxRetries - 1) {
+          throw std::runtime_error("Error retrieving results: " + errorMsg);
         }
       }
-    }
+      // v2 API: measurementCounts nested under data.resultData
+      else if (resultJson.contains("data") &&
+               resultJson["data"].contains("resultData") &&
+               resultJson["data"]["resultData"].contains("measurementCounts")) {
+        cudaq::info("Processing results from v2 endpoint");
+        CountsDictionary counts;
+        auto &measurements =
+            resultJson["data"]["resultData"]["measurementCounts"];
+
+        // qBraid reports each bitstring with classical bit 0 as the
+        // rightmost character (little-endian, as Qiskit does), while
+        // CUDA-Q indexes bitstrings with qubit 0 leftmost. The circuit
+        // measures the whole register in order (`measure q -> c`, see
+        // `combine-measurements` in qbraid.yml), so bit i is qubit i and
+        // reversing the key is the complete conversion. Mirrors the
+        // endian swap in the IonQ helper.
+        for (const auto &[bitstring, count] : measurements.items()) {
+          std::string key = bitstring;
+          std::reverse(key.begin(), key.end());
+          counts[key] = count.is_number()
+                            ? static_cast<std::size_t>(count.get<double>())
+                            : static_cast<std::size_t>(count);
+        }
+
+        // The returned bitstring spans every measured qubit, including
+        // compiler-generated ancillae that the user never declared. Reduce
+        // it down to the user-visible qubits using the output_names entry
+        // populated by the framework (Executor.cpp writes one per submitted
+        // circuit; Future.cpp re-initializes the helper with that config
+        // before processResults runs). Mirrors the IonQ / Braket helpers.
+        cudaq::ExecutionResult fullExecResults{counts};
+        auto fullSampleResults = cudaq::sample_result{fullExecResults};
+
+        std::vector<ExecutionResult> execResults;
+
+        auto outputNamesIt = outputNames.find(jobId);
+        if (outputNamesIt != outputNames.end() &&
+            !outputNamesIt->second.empty()) {
+          auto &job_output_names = outputNamesIt->second;
+
+          std::vector<std::size_t> qubitNumbers;
+          qubitNumbers.reserve(job_output_names.size());
+          for (auto &[result, info] : job_output_names)
+            qubitNumbers.push_back(info.qubitNum);
+
+          auto subset = fullSampleResults.get_marginal(qubitNumbers);
+          execResults.emplace_back(ExecutionResult{subset.to_map()});
+
+          // Emit one single-bit register per named result so that
+          // `sample_result::to_map(registerName)` still works.
+          for (const auto &[result, info] : job_output_names) {
+            CountsDictionary regCounts;
+            for (const auto &[bits, count] : fullSampleResults)
+              regCounts[std::string{bits[info.qubitNum]}] += count;
+            execResults.emplace_back(regCounts, info.registerName);
+          }
+        } else {
+          // No output_names available: fall back to the full flat counts.
+          execResults.emplace_back(ExecutionResult{counts});
+        }
+
+        return cudaq::sample_result(execResults);
+      }
+
+      // No valid data yet and no explicit error - retry
+      return std::nullopt;
+    };
+
+    // Called with every std::exception thrown by an attempt. Terminal errors
+    // are rethrown as a new exception; anything else is logged and retried.
+    auto onFetchError = [&](const std::exception &e, int attempt) {
+      // RestClient throws std::runtime_error on any non-success HTTP status
+      // (see runtime/common/RestClient.cpp) with a fixed message format:
+      //   "HTTP <VERB> Error - status code <code>: <curl_err>: <body>"
+      // The code isn't exposed as a structured attribute, so we parse it
+      // out to distinguish terminal client errors (401/403/404/409) from
+      // transient server/network errors (5xx, parse errors) that retry.
+      static const std::regex statusRx(R"(status code (\d+))");
+      const std::string what = e.what();
+      std::smatch match;
+      int statusCode = 0;
+      if (std::regex_search(what, match, statusRx))
+        statusCode = std::stoi(match[1]);
+
+      // Terminal: auth failures - retrying will not recover.
+      if (statusCode == 401 || statusCode == 403)
+        throw std::runtime_error(
+            "qBraid authentication failed (HTTP " + std::to_string(statusCode) +
+            "). Verify QBRAID_API_KEY or api_key target argument.");
+
+      // Terminal: result resource genuinely does not exist. This is
+      // distinct from the "not yet available" race which returns
+      // 200 + success=false (handled above).
+      if (statusCode == 404)
+        throw std::runtime_error(
+            "qBraid result not found (HTTP 404) for job " + jobId +
+            ". The job may have been deleted or never produced results.");
+
+      // Terminal: job reached a non-success terminal state (FAILED or
+      // CANCELLED). qBraid v2 returns 409 Conflict on /result in that case
+      // because no measurement data will ever be produced.
+      if (statusCode == 409)
+        throw std::runtime_error(
+            "qBraid job " + jobId +
+            " did not produce results (HTTP 409). The job likely FAILED "
+            "or was CANCELLED.");
+
+      // Retryable: 5xx, network errors, JSON parse failures, etc.
+      cudaq::info("Exception when fetching results (attempt {}/{}): {}",
+                  attempt + 1, maxRetries, what);
+    };
+
+    auto onRetry = [](int, std::chrono::seconds delay, bool threw) {
+      if (threw)
+        cudaq::info("Retrying in {} seconds", delay.count());
+      else
+        cudaq::info("No valid results yet, retrying in {} seconds",
+                    delay.count());
+    };
+
+    if (auto results = cudaq::polling::retryWithDelay(
+            maxRetries, fetchResults, onFetchError,
+            cudaq::polling::exponentialBackoffSeconds(waitTime, backoffFactor),
+            onRetry))
+      return *results;
 
     throw std::runtime_error("Failed to retrieve measurement counts after " +
                              std::to_string(maxRetries) + " attempts");

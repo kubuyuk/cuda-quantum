@@ -9,6 +9,7 @@
 #include "common/BraketExecutor.h"
 #include "common/BraketServerHelper.h"
 #include "common/FmtCore.h"
+#include "common/PollingPolicy.h"
 #include "nlohmann/json.hpp"
 #include <aws/braket/model/Association.h>
 #include <aws/braket/model/AssociationType.h>
@@ -191,23 +192,23 @@ BraketExecutor::execute(std::vector<KernelExecution> &codesToExecute,
 
           Aws::Braket::Model::GetQuantumTaskRequest req;
           req.SetQuantumTaskArn(taskArn);
-          auto getResponse = braketClientPtr->GetQuantumTask(req);
-          if (!getResponse.IsSuccess()) {
-            throw std::runtime_error(getResponse.GetError().GetMessage());
-          }
-          auto taskStatus = getResponse.GetResult().GetStatus();
-          while (
-              taskStatus != Aws::Braket::Model::QuantumTaskStatus::COMPLETED &&
-              taskStatus != Aws::Braket::Model::QuantumTaskStatus::FAILED &&
-              taskStatus != Aws::Braket::Model::QuantumTaskStatus::CANCELLED) {
-            std::this_thread::sleep_for(pollingInterval);
-
-            getResponse = braketClientPtr->GetQuantumTask(req);
-            if (!getResponse.IsSuccess()) {
-              throw std::runtime_error(getResponse.GetError().GetMessage());
+          auto getTask = [&] {
+            auto response = braketClientPtr->GetQuantumTask(req);
+            if (!response.IsSuccess()) {
+              throw std::runtime_error(response.GetError().GetMessage());
             }
-            taskStatus = getResponse.GetResult().GetStatus();
-          }
+            return response;
+          };
+          auto taskIsTerminal = [](const auto &response) {
+            auto status = response.GetResult().GetStatus();
+            return status == Aws::Braket::Model::QuantumTaskStatus::COMPLETED ||
+                   status == Aws::Braket::Model::QuantumTaskStatus::FAILED ||
+                   status == Aws::Braket::Model::QuantumTaskStatus::CANCELLED;
+          };
+          auto getResponse = polling::pollUntilDone(
+              getTask(), taskIsTerminal, getTask,
+              [this](const auto &) { return pollingInterval; });
+          auto taskStatus = getResponse.GetResult().GetStatus();
 
           auto getResult = getResponse.GetResult();
           if (taskStatus != Aws::Braket::Model::QuantumTaskStatus::COMPLETED) {

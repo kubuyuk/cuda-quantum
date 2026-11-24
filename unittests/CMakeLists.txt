@@ -256,6 +256,12 @@ add_executable(test_credential_file common/CredentialFileTester.cpp)
 target_link_libraries(test_credential_file PRIVATE cudaq cudaq-common gtest_main)
 cudaq_gtest_discover_tests(test_credential_file DISCOVERY_TIMEOUT 120)
 
+# Header-only polling/retry helper shared by the REST server helpers
+add_executable(test_polling_policy main.cpp common/PollingPolicyTester.cpp)
+target_include_directories(test_polling_policy PRIVATE .)
+target_link_libraries(test_polling_policy PRIVATE cudaq-common gtest_main)
+cudaq_gtest_discover_tests(test_polling_policy DISCOVERY_TIMEOUT 120)
+
 add_executable(test_quantum_platform main.cpp common/QuantumPlatformTester.cpp
   common/RemoteExecutorTester.cpp)
 target_include_directories(test_quantum_platform PRIVATE .)
