@@ -116,6 +116,14 @@ repos:
         files: '^runtime/.*\.(cpp|h)$'
         stages: [pre-commit, pre-push]
 
+      - id: shared-helpers-selftest
+        name: Self-test for the shared-helpers check
+        entry: bash scripts/pre-commit/test_check_shared_helpers.sh
+        language: system
+        files: '^scripts/pre-commit/(test_)?check_shared_helpers\.sh$'
+        pass_filenames: false
+        stages: [pre-commit, pre-push]
+
       # Spell checking (runs on push)
       - id: spellcheck
         name: Spell check (pyspelling)
