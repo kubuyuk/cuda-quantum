@@ -11,10 +11,12 @@
 #include "common/RestClient.h"
 #include "common/ServerHelper.h"
 #include "cudaq/algorithm.h"
+#include <chrono>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 #include <stdlib.h>
+#include <string>
 
 // Update the backend string to match the QBraid format
 std::string mockPort = "62454";
@@ -191,6 +193,22 @@ CUDAQ_TEST(QbraidTester, checkJobFailure) {
   EXPECT_ANY_THROW({ (void)cudaq::sample(kernel); });
 }
 
+// Helper: match a substring in the exception message.
+static ::testing::AssertionResult throwsWithMessage(std::function<void()> fn,
+                                                    const std::string &needle) {
+  try {
+    fn();
+  } catch (const std::exception &e) {
+    std::string what = e.what();
+    if (what.find(needle) != std::string::npos)
+      return ::testing::AssertionSuccess();
+    return ::testing::AssertionFailure()
+           << "exception message did not contain '" << needle << "'. Actual: '"
+           << what << "'";
+  }
+  return ::testing::AssertionFailure() << "expected exception, none thrown";
+}
+
 // Arm the mock to make the next N /result calls return "not yet available",
 // so processResults must retry. maxRetries is 3, so 2 delays should succeed.
 CUDAQ_TEST(QbraidTester, checkResultRetry) {
@@ -207,8 +225,14 @@ CUDAQ_TEST(QbraidTester, checkResultRetry) {
   kernel.h(qubit[0]);
   kernel.mz(qubit[0]);
 
+  // Two failed attempts sleep 2 s then 4 s (waitTime * backoffFactor^attempt)
+  // before the third attempt succeeds. sleep_for never returns early, so the
+  // elapsed time has a hard lower bound; no upper bound is asserted.
+  auto start = std::chrono::steady_clock::now();
   auto counts = cudaq::sample(kernel);
+  auto elapsed = std::chrono::steady_clock::now() - start;
   EXPECT_GE(counts.size(), 1u);
+  EXPECT_GE(elapsed, std::chrono::seconds(6));
 }
 
 // Arm enough delays to exhaust the retry budget (maxRetries = 3). Sample must
@@ -227,7 +251,14 @@ CUDAQ_TEST(QbraidTester, checkResultRetryExhaustion) {
   kernel.h(qubit[0]);
   kernel.mz(qubit[0]);
 
-  EXPECT_ANY_THROW({ (void)cudaq::sample(kernel); });
+  // The last attempt's success=false error is swallowed by the retry loop, so
+  // the caller sees the generic exhaustion message with the attempt count.
+  // Attempts 1 and 2 sleep 2 s + 4 s; there is no sleep after the last one.
+  auto start = std::chrono::steady_clock::now();
+  EXPECT_TRUE(throwsWithMessage([&]() { (void)cudaq::sample(kernel); },
+                                "after 3 attempts"));
+  auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_GE(elapsed, std::chrono::seconds(6));
 }
 
 // Helper: arm the mock to return a specific HTTP status on the next /result.
@@ -243,22 +274,6 @@ static void armResultStatus(int code) {
                   "test/force_next_result_status/" + std::to_string(code), body,
                   headers, /*enableLogging=*/false);
   ASSERT_EQ(armed.value("armed_status", -1), code);
-}
-
-// Helper: match a substring in the exception message.
-static ::testing::AssertionResult throwsWithMessage(std::function<void()> fn,
-                                                    const std::string &needle) {
-  try {
-    fn();
-  } catch (const std::exception &e) {
-    std::string what = e.what();
-    if (what.find(needle) != std::string::npos)
-      return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure()
-           << "exception message did not contain '" << needle << "'. Actual: '"
-           << what << "'";
-  }
-  return ::testing::AssertionFailure() << "expected exception, none thrown";
 }
 
 // 401 on /result -> terminal auth failure, message must name the status.
@@ -334,6 +349,70 @@ CUDAQ_TEST(QbraidTester, checkAnalogDeviceRejected) {
   EXPECT_TRUE(
       throwsWithMessage([&]() { helper->initialize(config); },
                         "device 'aws:quera:qpu:aquila' has paradigm 'analog'"));
+}
+
+namespace {
+// Sets (value != nullptr) or unsets an environment variable for the lifetime
+// of the object and restores the previous state afterwards.
+struct ScopedEnv {
+  ScopedEnv(const char *name, const char *value) : name(name) {
+    if (const char *old = std::getenv(name)) {
+      hadOld = true;
+      oldValue = old;
+    }
+    if (value)
+      ::setenv(name, value, 1);
+    else
+      ::unsetenv(name);
+  }
+  ~ScopedEnv() {
+    if (hadOld)
+      ::setenv(name, oldValue.c_str(), 1);
+    else
+      ::unsetenv(name);
+  }
+  const char *name;
+  bool hadOld = false;
+  std::string oldValue;
+};
+} // namespace
+
+// With emulate=false and no api_key in the config, the key must come from
+// QBRAID_API_KEY; if that is unset, initialize() fails before any request.
+CUDAQ_TEST(QbraidTester, checkMissingApiKeyThrows) {
+  ScopedEnv env("QBRAID_API_KEY", nullptr);
+  auto helper = cudaq::registry::get<cudaq::ServerHelper>("qbraid");
+  ASSERT_TRUE(helper);
+  cudaq::BackendConfig config;
+  config["emulate"] = "false";
+  config["url"] = "http://localhost:" + mockPort;
+  EXPECT_TRUE(throwsWithMessage([&]() { helper->initialize(config); },
+                                "QBRAID_API_KEY environment variable is not "
+                                "set."));
+}
+
+CUDAQ_TEST(QbraidTester, checkEmulateDoesNotRequireApiKey) {
+  ScopedEnv env("QBRAID_API_KEY", nullptr);
+  auto helper = cudaq::registry::get<cudaq::ServerHelper>("qbraid");
+  ASSERT_TRUE(helper);
+  cudaq::BackendConfig config;
+  config["emulate"] = "true";
+  config["url"] = "http://localhost:" + mockPort;
+  helper->initialize(config);
+  EXPECT_EQ(helper->getConfig()["api_key"], "");
+}
+
+CUDAQ_TEST(QbraidTester, checkApiKeyFromEnv) {
+  ScopedEnv env("QBRAID_API_KEY", "11111111111111111111111111111111");
+  auto helper = cudaq::registry::get<cudaq::ServerHelper>("qbraid");
+  ASSERT_TRUE(helper);
+  cudaq::BackendConfig config;
+  config["emulate"] = "false";
+  config["url"] = "http://localhost:" + mockPort;
+  helper->initialize(config);
+  auto resolved = helper->getConfig();
+  EXPECT_EQ(resolved["api_key"], "11111111111111111111111111111111");
+  EXPECT_EQ(resolved["device_id"], "qbraid:qbraid:sim:qir-sv");
 }
 
 int main(int argc, char **argv) {

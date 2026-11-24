@@ -16,6 +16,7 @@ set(COMMON_RUNTIME_SRC
   AnalogRydberg.cpp
   AnalysisScope.cpp
   CodeGenConfig.cpp
+  CredentialFile.cpp
   cudaq_json.cpp
   CustomOp.cpp
   DeviceCodeRegistry.cpp
