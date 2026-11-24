@@ -11,6 +11,7 @@
 #include "common/RestClient.h"
 #include "common/ServerHelper.h"
 #include "cudaq/algorithm.h"
+#include <chrono>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -191,6 +192,22 @@ CUDAQ_TEST(QbraidTester, checkJobFailure) {
   EXPECT_ANY_THROW({ (void)cudaq::sample(kernel); });
 }
 
+// Helper: match a substring in the exception message.
+static ::testing::AssertionResult throwsWithMessage(std::function<void()> fn,
+                                                    const std::string &needle) {
+  try {
+    fn();
+  } catch (const std::exception &e) {
+    std::string what = e.what();
+    if (what.find(needle) != std::string::npos)
+      return ::testing::AssertionSuccess();
+    return ::testing::AssertionFailure()
+           << "exception message did not contain '" << needle << "'. Actual: '"
+           << what << "'";
+  }
+  return ::testing::AssertionFailure() << "expected exception, none thrown";
+}
+
 // Arm the mock to make the next N /result calls return "not yet available",
 // so processResults must retry. maxRetries is 3, so 2 delays should succeed.
 CUDAQ_TEST(QbraidTester, checkResultRetry) {
@@ -207,8 +224,14 @@ CUDAQ_TEST(QbraidTester, checkResultRetry) {
   kernel.h(qubit[0]);
   kernel.mz(qubit[0]);
 
+  // Two failed attempts sleep 2 s then 4 s (waitTime * backoffFactor^attempt)
+  // before the third attempt succeeds. sleep_for never returns early, so the
+  // elapsed time has a hard lower bound; no upper bound is asserted.
+  auto start = std::chrono::steady_clock::now();
   auto counts = cudaq::sample(kernel);
+  auto elapsed = std::chrono::steady_clock::now() - start;
   EXPECT_GE(counts.size(), 1u);
+  EXPECT_GE(elapsed, std::chrono::seconds(6));
 }
 
 // Arm enough delays to exhaust the retry budget (maxRetries = 3). Sample must
@@ -227,7 +250,14 @@ CUDAQ_TEST(QbraidTester, checkResultRetryExhaustion) {
   kernel.h(qubit[0]);
   kernel.mz(qubit[0]);
 
-  EXPECT_ANY_THROW({ (void)cudaq::sample(kernel); });
+  // The last attempt's success=false error is swallowed by the retry loop, so
+  // the caller sees the generic exhaustion message with the attempt count.
+  // Attempts 1 and 2 sleep 2 s + 4 s; there is no sleep after the last one.
+  auto start = std::chrono::steady_clock::now();
+  EXPECT_TRUE(throwsWithMessage([&]() { (void)cudaq::sample(kernel); },
+                                "after 3 attempts"));
+  auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_GE(elapsed, std::chrono::seconds(6));
 }
 
 // Helper: arm the mock to return a specific HTTP status on the next /result.
@@ -243,22 +273,6 @@ static void armResultStatus(int code) {
                   "test/force_next_result_status/" + std::to_string(code), body,
                   headers, /*enableLogging=*/false);
   ASSERT_EQ(armed.value("armed_status", -1), code);
-}
-
-// Helper: match a substring in the exception message.
-static ::testing::AssertionResult throwsWithMessage(std::function<void()> fn,
-                                                    const std::string &needle) {
-  try {
-    fn();
-  } catch (const std::exception &e) {
-    std::string what = e.what();
-    if (what.find(needle) != std::string::npos)
-      return ::testing::AssertionSuccess();
-    return ::testing::AssertionFailure()
-           << "exception message did not contain '" << needle << "'. Actual: '"
-           << what << "'";
-  }
-  return ::testing::AssertionFailure() << "expected exception, none thrown";
 }
 
 // 401 on /result -> terminal auth failure, message must name the status.
